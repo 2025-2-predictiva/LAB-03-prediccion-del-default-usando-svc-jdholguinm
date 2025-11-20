@@ -95,3 +95,184 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+
+import os
+import pandas as pd
+import gzip
+import json
+import pickle
+import numpy as np
+
+
+from sklearn.preprocessing import OneHotEncoder, StandardScaler 
+from sklearn.compose import ColumnTransformer
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import confusion_matrix, balanced_accuracy_score, precision_score, recall_score, f1_score
+from sklearn.feature_selection import SelectKBest, f_classif, f_regression 
+
+"Paso 1: cargar y preprocesar datos"
+def cargar_preprocesar_datos():
+    train_dataset = pd.read_csv("files/input/train_data.csv.zip", index_col=False)
+    test_dataset = pd.read_csv("files/input/test_data.csv.zip", index_col=False)
+
+    train_dataset.rename(columns={"default payment next month": "default"}, inplace=True)
+    test_dataset.rename(columns={"default payment next month": "default"}, inplace=True)
+
+    train_dataset.drop(columns="ID", inplace=True)
+    test_dataset.drop(columns="ID", inplace=True)
+
+    train_dataset = train_dataset[train_dataset["EDUCATION"] != 0]
+    test_dataset = test_dataset[test_dataset["EDUCATION"] != 0]
+
+    train_dataset = train_dataset[train_dataset["MARRIAGE"] != 0]
+    test_dataset = test_dataset[test_dataset["MARRIAGE"] != 0]
+
+    train_dataset["EDUCATION"] = train_dataset["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+    test_dataset["EDUCATION"] = test_dataset["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+
+    return train_dataset, test_dataset
+
+"Paso 2: División de los datos en conjuntos de entrenamiento y prueba"
+def make_train_test_split(train_dataset, test_dataset):
+    X_train = train_dataset.drop(columns="default")
+    y_train = train_dataset["default"]
+
+    X_test = test_dataset.drop(columns="default")
+    y_test = test_dataset["default"]
+
+    return X_train, y_train, X_test, y_test
+
+"Paso 3: Cree un pipeline para el modelo de clasificación."
+def make_pipeline(X_train):
+    categorical_features = ["EDUCATION", "MARRIAGE", "SEX"]
+    numerical_features = [col for col in X_train.columns if col not in categorical_features]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("cat", OneHotEncoder(), categorical_features),
+            ('num',StandardScaler(), numerical_features),
+        ],
+        remainder='passthrough'
+    )
+
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ('pca', PCA()),
+        ("selectKBest", SelectKBest(score_func=f_classif)),
+        ('svc', SVC(random_state=42))
+    ])
+
+    return pipeline
+
+"Paso 4: Optimización de los hiperparámetros"
+def make_grid_search(pipeline, X_train, y_train):
+    param_grid = {
+    'pca__n_components':[20, 21],   # Cantidad de componentes principales a conservar en el paso PCA del pipeline.
+    'selectKBest__k':[12],          # Características a mantener en el SelectKBest (selección de características).
+    'svc__kernel': ['rbf'],         # (Radial Basis Function), kernel gaussiano más usado.
+    'svc__gamma': [0.1],            # Gamma controla cuánto influye un ejemplo de entrenamiento sobre el modelo.
+    
+    }
+
+    model = GridSearchCV(
+    pipeline,
+    param_grid,
+    cv = 10,
+    scoring="balanced_accuracy",
+    n_jobs=-1,
+    refit=True
+    )
+    model.fit(X_train, y_train)
+
+    return model
+
+"Paso 5: Guardar Modelo"
+def save_estimator(estimator):
+    models_path = "files/models"
+    os.makedirs(models_path, exist_ok=True)
+    print("Guardando modelo en:", models_path)  # 👈 agrega esto
+    model_file = os.path.join(models_path, "model.pkl.gz")
+
+    with gzip.open(model_file, "wb") as file:
+        pickle.dump(estimator, file)   
+
+"Paso 6 Y 7: Metricas, matriz de confusión y guardarlas en formato JSON"
+
+def calc_metrics(model, X_train, y_train, X_test, y_test):
+
+    # Cálculo de Predicciones
+    y_train_pred = model.predict(X_train)
+    y_test_pred = model.predict(X_test)
+    #Cálculo de Matriz de Confusión
+    cm_train = confusion_matrix(y_train, y_train_pred)
+    cm_test = confusion_matrix(y_test, y_test_pred)
+
+    metricas =[
+        {   # Train
+            'type': 'metrics',
+            'dataset': 'train',
+            'precision': precision_score(y_train, y_train_pred, zero_division=0),
+            'balanced_accuracy': balanced_accuracy_score(y_train, y_train_pred),
+            'recall': recall_score(y_train, y_train_pred, zero_division=0),
+            'f1_score': f1_score(y_train, y_train_pred, zero_division=0)
+        },
+        {   # Test
+            'type': 'metrics',
+            'dataset': 'test',
+            'precision': precision_score(y_test, y_test_pred, zero_division=0),
+            'balanced_accuracy': balanced_accuracy_score(y_test, y_test_pred),
+            'recall': recall_score(y_test, y_test_pred, zero_division=0),
+            'f1_score': f1_score(y_test, y_test_pred, zero_division=0)
+        },
+        {   # Matriz de Confusión Train
+            'type': 'cm_matrix',
+            'dataset': 'train',
+            'true_0': {'predicted_0': int(cm_train[0, 0]), 'predicted_1': int(cm_train[0, 1])},
+            'true_1': {'predicted_0': int(cm_train[1, 0]), 'predicted_1': int(cm_train[1, 1])}
+        },
+        {   # Matriz de Confusión Test
+            'type': 'cm_matrix',
+            'dataset': 'test',
+            'true_0': {'predicted_0': int(cm_test[0, 0]), 'predicted_1': int(cm_test[0, 1])},
+            'true_1': {'predicted_0': int(cm_test[1, 0]), 'predicted_1': int(cm_test[1, 1])}
+        }
+
+    ]
+
+    return metricas
+
+def save_metrics(metricas):
+    output_path="files/output"
+    os.makedirs(output_path, exist_ok=True)
+    metrics_file = os.path.join(output_path, "metrics.json")
+   
+    # El test espera un archivo JSONL (una métrica por línea)
+    with open(metrics_file, "w", encoding="utf-8") as f:
+        for metric in metricas:
+            json.dump(metric, f)
+            f.write("\n")
+
+    print("Métricas guardadas en:", metrics_file)
+
+
+def main():
+    try:
+        train_dataset, test_dataset = cargar_preprocesar_datos()
+        X_train, y_train, X_test, y_test = make_train_test_split(train_dataset, test_dataset)
+        pipeline = make_pipeline(X_train)
+        model = make_grid_search(pipeline, X_train, y_train)
+        save_estimator(model)
+        metricas = calc_metrics(model, X_train, y_train, X_test, y_test)
+        save_metrics(metricas)
+        print(model.best_estimator_)
+        print(model.best_params_)
+    except Exception as e:
+        print("ERROR:", e)
+    
+
+if __name__ == "__main__":
+    main()
